@@ -1,9 +1,12 @@
 import json, os, asyncio, httpx
 from datetime import datetime, timezone
 from pathlib import Path
+from difflib import SequenceMatcher as SM
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+# pyrefly: ignore [missing-import]
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DB_URL, NEWS_KEY, HF_KEY = os.environ.get("DATABASE_URL", "sqlite:///./worldpulse.db"), os.environ.get("NEWS_API_KEY", ""), os.environ.get("HF_API_KEY", "")
@@ -36,19 +39,25 @@ async def fetch(c: str, s: str = ""):
     db = SessionLocal()
     try:
         iso = C_LKUP.get(c, {}).get("iso2", "").lower()
-        q = f'"{s}"' if s and iso else (f'"{s}" AND "{c}"' if s else f'"{c}"')
         async with httpx.AsyncClient() as cl:
-            d = (await cl.get("https://newsdata.io/api/1/latest", params={"language": "en", "size": 10, "apikey": NEWS_KEY, "q": q, **({"country": iso} if iso else {})}, timeout=15)).json()
+            d = (await cl.get("https://newsdata.io/api/1/latest", params={"language": "en", "size": 10, "apikey": NEWS_KEY, ("qInTitle" if s else "q"): f'"{s}"' if s else f'"{c}"', **({"country": iso} if iso else {})}, timeout=15)).json()
             if d.get("status") != "success": return
-            res = [a for a in d.get("results", []) if a.get("title") and a.get("link")]
-            sums = await asyncio.gather(*(sum_hf(cl, a.get("description") or a.get("content") or a.get("title", "")) for a in res))
-            seen = set()
-            for a, sm in zip(res, sums):
-                l = a["link"]
-                if l in seen: continue
-                seen.add(l)
-                if ex := db.query(Art).filter(Art.u == l).first(): ex.t, ex.src, ex.sum, ex.fts = a["title"], a.get("source_name", "Unknown"), sm, datetime.now(timezone.utc)
-                else: db.add(Art(c=c, s=s, t=a["title"], src=a.get("source_name", "Unknown"), u=l, sum=sm, ts=datetime.now(timezone.utc)))
+            ex_arts = db.query(Art).filter(Art.c == c, Art.s == s).order_by(Art.ts.desc()).limit(20).all()
+            new_arts = []
+            for a in d.get("results", []):
+                t, l, src = a.get("title"), a.get("link"), a.get("source_name", "Unknown")
+                if not t or not l: continue
+                if m := next((x for x in ex_arts if SM(None, x.t.lower(), t.lower()).ratio() > 0.6), None):
+                    if src not in m.src: m.src += f", {src}"
+                    m.fts = datetime.now(timezone.utc)
+                elif m := next((x for x in new_arts if SM(None, x["title"].lower(), t.lower()).ratio() > 0.6), None):
+                    if src not in m["src"]: m["src"] += f", {src}"
+                else:
+                    a["src"] = src
+                    new_arts.append(a)
+            if new_arts:
+                sums = await asyncio.gather(*(sum_hf(cl, a.get("description") or a.get("content") or a.get("title", "")) for a in new_arts))
+                for a, sm in zip(new_arts, sums): db.add(Art(c=c, s=s, t=a["title"], src=a["src"], u=a["link"], sum=sm, ts=datetime.now(timezone.utc)))
             db.commit()
     except Exception as e: db.rollback()
     finally: db.close(); _f.discard(f"{c}:{s}")
