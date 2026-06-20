@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import Globe from 'react-globe.gl'
 import { X, Loader2, RefreshCw, ChevronLeft, MapPin, ChevronDown, ChevronUp, Globe as Glb, Clock } from 'lucide-react'
 
-const API = 'http://127.0.0.1:8000'
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 export default function App() {
   const [d, setD] = useState({ C: [], S: [], glPol: [], glLn: [], selC: null, selS: null, news: null, load: false, ref: false, stats: {c:0,a:0,s:0}, majC: [], exp: false })
