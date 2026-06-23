@@ -15,7 +15,8 @@ C = json.load(open(D/"countries.json", encoding="utf-8"))
 S = json.load(open(D/"states.json", encoding="utf-8"))
 C_LKUP = {c["name"]: c for c in C}
 
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+connect_args = {"check_same_thread": False} if DB_URL.startswith("sqlite") else {}
+engine = create_engine(DB_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
