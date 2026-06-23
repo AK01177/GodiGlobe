@@ -10,10 +10,16 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 DB_URL = os.environ.get("DATABASE_URL", "sqlite:///./worldpulse.db")
 NEWS_KEY = os.environ.get("NEWS_API_KEY", "")
-D = Path(__file__).parent
-C = json.load(open(D/"countries.json", encoding="utf-8"))
-S = json.load(open(D/"states.json", encoding="utf-8"))
+DATA_DIR = Path(__file__).parent
+
+def _load_json(name: str):
+    with open(DATA_DIR / name, encoding="utf-8") as f:
+        return json.load(f)
+
+C = _load_json("countries.json")
+S = _load_json("states.json")
 C_LKUP = {c["name"]: c for c in C}
+TOTAL_STATES = sum(len(states) for states in S.values())
 
 connect_args = {"check_same_thread": False} if DB_URL.startswith("sqlite") else {}
 engine = create_engine(DB_URL, connect_args=connect_args)
@@ -39,7 +45,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
 # Simple lock to prevent redundant API calls for the same location
 _fetching = set()
 
+def _truncate_summary(text: str, max_len: int = 500) -> str:
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + "..."
+
 async def fetch(c: str, s: str = ""):
+    if not NEWS_KEY:
+        print("NEWS_API_KEY is not set; skipping news fetch.")
+        return
+
     location_key = f"{c}:{s}"
     if location_key in _fetching:
         return
@@ -71,9 +87,15 @@ async def fetch(c: str, s: str = ""):
                 exists = db.query(Art).filter(Art.u == l).first()
                 if not exists:
                     desc = a.get("description") or a.get("content") or a.get("title", "")
-                    # Simple text truncation instead of slow AI summarization
-                    summary = desc[:500] + "..." if len(desc) > 500 else desc
-                    db.add(Art(c=c, s=s, t=t, src=src, u=l, sum=summary, ts=datetime.now(timezone.utc)))
+                    summary = _truncate_summary(desc)
+                    pub = a.get("pubDate")
+                    published = datetime.now(timezone.utc)
+                    if pub:
+                        try:
+                            published = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+                    db.add(Art(c=c, s=s, t=t, src=src, u=l, sum=summary, ts=published))
             db.commit()
     except Exception as e: 
         print(f"Error fetching news: {e}")
@@ -125,8 +147,14 @@ def get_states(c: str): return {"country": c, "states": S.get(c, [])}
 @app.get("/stats")
 def get_stats():
     db = SessionLocal()
-    try: return {"total_articles": db.query(Art).count(), "countries_tracked": db.query(Art.c).distinct().count()}
-    finally: db.close()
+    try:
+        return {
+            "total_articles": db.query(Art).count(),
+            "countries_tracked": db.query(Art.c).distinct().count(),
+            "total_states": TOTAL_STATES,
+        }
+    finally:
+        db.close()
 
 @app.get("/health")
 def health_check(): return {"status": "ok"}

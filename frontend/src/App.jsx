@@ -12,6 +12,17 @@ const pathColor = () => 'rgba(255,255,255,0.08)'
 const pointColor = x => x.type === 's' ? (x.sel ? '#fbbf24' : 'rgba(251,191,36,0.55)') : x.type === 'cs' ? '#60a5fa' : 'rgba(255,255,255,0.35)'
 const pointRadius = x => x.type === 's' ? (x.sel ? 0.35 : 0.15) : x.type === 'cs' ? 0.4 : 0.2
 
+async function loadJson(url, fallbackUrl) {
+  const res = await fetch(url)
+  if (res.ok) return res.json()
+  if (fallbackUrl) {
+    const fallback = await fetch(fallbackUrl)
+    if (!fallback.ok) throw new Error(`Failed to load ${url}`)
+    return fallback.json()
+  }
+  throw new Error(`Failed to load ${url}`)
+}
+
 export default function App() {
   const [countries, setCountries] = useState([])
   const [majorCountries, setMajorCountries] = useState([])
@@ -22,25 +33,30 @@ export default function App() {
   const [lines, setLines] = useState([])
   const [news, setNews] = useState(null)
   const [loading, setLoading] = useState(null) // null | 'loading' | 'refreshing'
+  const [error, setError] = useState(null)
   const [showStates, setShowStates] = useState(false)
 
   // Initial data load
   useEffect(() => {
+    const geojsonFallback = 'https://raw.githubusercontent.com/vasturiano/react-globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson'
+
     Promise.all([
-      fetch('/countries.json'),
-      fetch('/geojson/ne_110m_admin_0_countries.geojson')
-        .catch(() => fetch('https://raw.githubusercontent.com/vasturiano/react-globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson')),
-      fetch(`${API}/stats`),
-      fetch(`${API}/major-countries`),
+      loadJson('/countries.json'),
+      loadJson('/geojson/ne_110m_admin_0_countries.geojson', geojsonFallback),
+      fetch(`${API}/stats`).then(r => r.ok ? r.json() : { total_articles: 0, total_states: 0 }),
+      fetch(`${API}/major-countries`).then(r => r.ok ? r.json() : []),
     ])
-      .then(rs => Promise.all(rs.map(r => r.json())))
       .then(([c, pol, stat, maj]) => {
         setCountries(c)
         setPolygons(pol.features.map(f => ({ ...f, isC: true })))
-        setStats({ c: c.length, a: stat.total_articles, s: stat.total_states || 0 })
+        setStats({ c: c.length, a: stat.total_articles ?? 0, s: stat.total_states ?? 0 })
         setMajorCountries(maj.map(m => m.name))
+        setError(null)
       })
-      .catch(console.error)
+      .catch(err => {
+        console.error(err)
+        setError('Unable to load map data. Check your connection and try again.')
+      })
   }, [])
 
   // Load state boundaries when a country is picked
@@ -51,12 +67,12 @@ export default function App() {
       setShowStates(false)
       return
     }
+    const statesGeoFallback = 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces_lines.geojson'
+
     Promise.all([
-      fetch('/geojson/ne_50m_admin_1_states_provinces_lines.geojson')
-        .catch(() => fetch('https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces_lines.geojson')),
-      fetch('/states.json'),
+      loadJson('/geojson/ne_50m_admin_1_states_provinces_lines.geojson', statesGeoFallback),
+      loadJson('/states.json'),
     ])
-      .then(rs => Promise.all(rs.map(r => r.json())))
       .then(([geo, statesData]) => {
         const ln = []
         geo.features.forEach(f => {
@@ -68,15 +84,27 @@ export default function App() {
         setLines(ln)
         setStates(statesData[selected.country] || [])
       })
+      .catch(err => console.error(err))
   }, [selected.country])
 
   const fetchNews = useCallback(async (country, state, refresh = false) => {
     setLoading(refresh ? 'refreshing' : 'loading')
     try {
       const qs = state ? `?state=${encodeURIComponent(state)}` : ''
-      const res = await fetch(`${API}/news/${encodeURIComponent(country)}${qs}`).then(r => r.json())
-      setNews(res)
-      if (res.status === 'refreshing') setTimeout(() => fetchNews(country, state, true), 4000)
+      const res = await fetch(`${API}/news/${encodeURIComponent(country)}${qs}`)
+      if (!res.ok) {
+        const detail = res.status === 404 ? 'Country not found.' : 'Failed to load news.'
+        setNews({ articles: [] })
+        setError(detail)
+        return
+      }
+      const data = await res.json()
+      setNews(data)
+      setError(null)
+      if (data.status === 'refreshing') setTimeout(() => fetchNews(country, state, true), 4000)
+    } catch {
+      setNews({ articles: [] })
+      setError('Could not reach the news API. Is the backend running?')
     } finally {
       setLoading(null)
     }
@@ -159,7 +187,7 @@ export default function App() {
       <div className="absolute top-0 left-0 w-full p-6 z-10 flex justify-between pointer-events-none">
         <div>
           <h1 className="text-2xl font-light tracking-[0.2em]">GODIGLOBE</h1>
-          <p className="text-[10px] tracking-[0.3em] text-white/30 uppercase mt-1">AI News</p>
+          <p className="text-[10px] tracking-[0.3em] text-white/30 uppercase mt-1">World News</p>
         </div>
         <div className="flex gap-6 text-xs tracking-widest text-white/50 uppercase pointer-events-auto">
           {[['Countries', stats.c], ['States', stats.s], ['Articles', stats.a]].map(([label, val]) => (
@@ -171,9 +199,15 @@ export default function App() {
         </div>
       </div>
 
+      {error && !selected.country && (
+        <div className="absolute bottom-6 left-6 z-20 max-w-sm px-4 py-3 text-xs uppercase tracking-wider bg-red-500/10 border border-red-500/30 text-red-300">
+          {error}
+        </div>
+      )}
+
       {/* Side Panel */}
       {selected.country && (
-        <div className="absolute top-0 right-0 h-full w-full sm:w-[500px] bg-black/40 backdrop-blur-3xl border-l border-white/10 z-20 flex flex-col pointer-events-auto">
+        <div className="absolute top-0 right-0 h-full w-full sm:w-[500px] bg-black/40 backdrop-blur-3xl border-l border-white/10 z-20 flex flex-col pointer-events-auto animate-slide-in">
 
           {/* Panel Header */}
           <div className="px-6 py-8 border-b border-white/10 bg-gradient-to-b from-white/10 to-transparent">
@@ -232,7 +266,10 @@ export default function App() {
           </div>
 
           {/* News List */}
-          <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+          <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+            {error && (
+              <p className="mb-4 text-xs uppercase tracking-wider text-red-300/90">{error}</p>
+            )}
             {loading === 'loading' ? (
               <div className="flex flex-col items-center justify-center h-full text-white/40">
                 <Loader2 className="animate-spin mb-6 text-blue-500" size={40} />
