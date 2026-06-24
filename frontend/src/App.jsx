@@ -172,7 +172,19 @@ export default function App() {
   const clearAll = useCallback(() => setSelected({ country: null, state: null }), [])
   const clearState = useCallback(() => setSelected(p => ({ ...p, state: null })), [])
 
-  const handlePolygonClick = useCallback(p => selectCountry(p.properties.ADMIN), [selectCountry])
+  const handlePolygonClick = useCallback(p => {
+    const iso2 = p.properties.ISO_A2;
+    const iso3 = p.properties.ISO_A3 || p.properties.ADM0_A3;
+    const name = p.properties.ADMIN;
+    
+    const country = countries.find(c => 
+      (iso2 && iso2 !== '-99' && c.iso2 === iso2) || 
+      (iso3 && iso3 !== '-99' && c.iso3 === iso3) || 
+      c.name === name
+    );
+
+    selectCountry(country ? country.name : name);
+  }, [selectCountry, countries])
   const handlePointClick = useCallback(x => x.type === 's'
     ? setSelected(p => ({ ...p, state: x.name }))
     : selectCountry(x.name), [selectCountry])
