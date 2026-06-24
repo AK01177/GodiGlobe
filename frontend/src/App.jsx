@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import Globe from 'react-globe.gl'
 import { X, Loader2, RefreshCw, ChevronLeft, MapPin, ChevronDown, ChevronUp, Globe as Glb, Clock } from 'lucide-react'
 
@@ -115,11 +115,17 @@ export default function App() {
       .catch(err => console.error(err))
   }, [selected.country])
 
+  const fetchRequestId = useRef(0)
+
   const fetchNews = useCallback(async (country, state, refresh = false) => {
+    const reqId = ++fetchRequestId.current
     setLoading(refresh ? 'refreshing' : 'loading')
     try {
       const qs = state ? `?state=${encodeURIComponent(state)}` : ''
       const res = await fetch(`${API}/news/${encodeURIComponent(country)}${qs}`)
+      
+      if (reqId !== fetchRequestId.current) return
+      
       if (!res.ok) {
         const detail = res.status === 404 ? 'Country not found.' : 'Failed to load news.'
         setNews({ articles: [] })
@@ -127,14 +133,20 @@ export default function App() {
         return
       }
       const data = await res.json()
+      
+      if (reqId !== fetchRequestId.current) return
+      
       setNews(data)
       setError(null)
-      if (data.status === 'refreshing') setTimeout(() => fetchNews(country, state, true), 4000)
+      if (data.status === 'refreshing') setTimeout(() => {
+        if (reqId === fetchRequestId.current) fetchNews(country, state, true)
+      }, 4000)
     } catch {
+      if (reqId !== fetchRequestId.current) return
       setNews({ articles: [] })
       setError('Could not reach the news API. Is the backend running?')
     } finally {
-      setLoading(null)
+      if (reqId === fetchRequestId.current) setLoading(null)
     }
   }, [])
 

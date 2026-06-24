@@ -42,8 +42,8 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="GodiGlobe API", version="4.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
 
-# Simple lock to prevent redundant API calls for the same location
-_fetching = set()
+# Dictionary of asyncio.Event to allow waiting for ongoing fetches
+_fetch_events = {}
 
 def _truncate_summary(text: str, max_len: int = 500) -> str:
     text = text.strip()
@@ -57,9 +57,13 @@ async def fetch(c: str, s: str = ""):
         return
 
     location_key = f"{c}:{s}"
-    if location_key in _fetching:
+    if location_key in _fetch_events:
+        # Wait for the ongoing fetch to complete
+        await _fetch_events[location_key].wait()
         return
-    _fetching.add(location_key)
+
+    event = asyncio.Event()
+    _fetch_events[location_key] = event
 
     db = SessionLocal()
     try:
@@ -83,7 +87,6 @@ async def fetch(c: str, s: str = ""):
                 t, l, src = a.get("title"), a.get("link"), a.get("source_name", "Unknown")
                 if not t or not l: continue
                 
-                # Check if this exact article URL already exists to prevent duplicate rows
                 exists = db.query(Art).filter(Art.u == l).first()
                 if not exists:
                     desc = a.get("description") or a.get("content") or a.get("title", "")
@@ -102,28 +105,26 @@ async def fetch(c: str, s: str = ""):
         db.rollback()
     finally: 
         db.close()
-        _fetching.discard(location_key)
+        event.set()
+        _fetch_events.pop(location_key, None)
 
 @app.get("/news/{c}")
-def get_news(c: str, bt: BackgroundTasks, state: str = ""):
+async def get_news(c: str, bt: BackgroundTasks, state: str = ""):
     if not C_LKUP.get(c): raise HTTPException(404, detail="Country not found")
     db = SessionLocal()
     try:
         a = db.query(Art).filter(Art.c == c, Art.s == state).order_by(Art.ts.desc()).limit(20).all()
         
-        # Check if the cached results are stale (older than 2 hours)
         stale = False
         if a and a[0].ts:
             ts_aware = a[0].ts.replace(tzinfo=timezone.utc) if not a[0].ts.tzinfo else a[0].ts
             stale = ts_aware.timestamp() < datetime.now(timezone.utc).timestamp() - 7200
             
         if not a:
-            # Synchronous fetch: the user waits, but gets results immediately on first load
-            asyncio.run(fetch(c, state))
+            await fetch(c, state)
             a = db.query(Art).filter(Art.c == c, Art.s == state).order_by(Art.ts.desc()).limit(20).all()
         elif stale:
-            # Background fetch: user gets fast cached results immediately, cache is updated in background
-            bt.add_task(lambda: asyncio.run(fetch(c, state)))
+            bt.add_task(fetch, c, state)
             
         return {
             "country": c, 
