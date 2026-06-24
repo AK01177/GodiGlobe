@@ -11,16 +11,34 @@ const polyStroke = () => 'rgba(255,255,255,0.25)'
 const pathColor = () => 'rgba(255,255,255,0.08)'
 const pointColor = x => x.type === 's' ? (x.sel ? '#fbbf24' : 'rgba(251,191,36,0.55)') : x.type === 'cs' ? '#60a5fa' : 'rgba(255,255,255,0.35)'
 const pointRadius = x => x.type === 's' ? (x.sel ? 0.35 : 0.15) : x.type === 'cs' ? 0.4 : 0.2
+const pathPoints = x => x
+const pathPointLat = p => p.lat
+const pathPointLng = p => p.lng
+const labelSize = x => x.sz || 0.5
+const labelColor = x => x.clr
+
+let cachedStatesGeo = null;
 
 async function loadJson(url, fallbackUrl) {
-  const res = await fetch(url)
-  if (res.ok) return res.json()
-  if (fallbackUrl) {
-    const fallback = await fetch(fallbackUrl)
-    if (!fallback.ok) throw new Error(`Failed to load ${url}`)
-    return fallback.json()
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('Status not ok')
+
+    // Vite returns 200 OK with index.html for missing files. We must check content type.
+    const contentType = res.headers.get('content-type')
+    if (!contentType || !contentType.includes('application/json')) {
+      throw new Error('Response is not JSON')
+    }
+
+    return await res.json()
+  } catch (err) {
+    if (fallbackUrl) {
+      const fallback = await fetch(fallbackUrl)
+      if (!fallback.ok) throw new Error(`Failed to load ${url}`)
+      return fallback.json()
+    }
+    throw new Error(`Failed to load ${url}`)
   }
-  throw new Error(`Failed to load ${url}`)
 }
 
 export default function App() {
@@ -41,7 +59,7 @@ export default function App() {
     const geojsonFallback = 'https://raw.githubusercontent.com/vasturiano/react-globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson'
 
     Promise.all([
-      loadJson('/countries.json'),
+      fetch(`${API}/countries`).then(r => r.ok ? r.json() : []),
       loadJson('/geojson/ne_110m_admin_0_countries.geojson', geojsonFallback),
       fetch(`${API}/stats`).then(r => r.ok ? r.json() : { total_articles: 0, total_states: 0 }),
       fetch(`${API}/major-countries`).then(r => r.ok ? r.json() : []),
@@ -69,20 +87,30 @@ export default function App() {
     }
     const statesGeoFallback = 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces_lines.geojson'
 
+    const fetchGeo = cachedStatesGeo
+      ? Promise.resolve(cachedStatesGeo)
+      : loadJson('/geojson/ne_50m_admin_1_states_provinces_lines.geojson', statesGeoFallback).then(data => {
+        cachedStatesGeo = data;
+        return data;
+      })
+
     Promise.all([
-      loadJson('/geojson/ne_50m_admin_1_states_provinces_lines.geojson', statesGeoFallback),
-      loadJson('/states.json'),
+      fetchGeo,
+      fetch(`${API}/states/${encodeURIComponent(selected.country)}`).then(r => r.ok ? r.json() : { states: [] }),
     ])
       .then(([geo, statesData]) => {
         const ln = []
         geo.features.forEach(f => {
+          // Filter to only process and render boundaries for the selected country
+          if (f.properties?.admin !== selected.country) return;
+
           if (f.geometry.type === 'LineString')
             ln.push(f.geometry.coordinates.map(c => ({ lat: c[1], lng: c[0] })))
           else if (f.geometry.type === 'MultiLineString')
             f.geometry.coordinates.forEach(l => ln.push(l.map(c => ({ lat: c[1], lng: c[0] }))))
         })
         setLines(ln)
-        setStates(statesData[selected.country] || [])
+        setStates(statesData.states || [])
       })
       .catch(err => console.error(err))
   }, [selected.country])
@@ -144,6 +172,11 @@ export default function App() {
   const clearAll = useCallback(() => setSelected({ country: null, state: null }), [])
   const clearState = useCallback(() => setSelected(p => ({ ...p, state: null })), [])
 
+  const handlePolygonClick = useCallback(p => selectCountry(p.properties.ADMIN), [selectCountry])
+  const handlePointClick = useCallback(x => x.type === 's'
+    ? setSelected(p => ({ ...p, state: x.name }))
+    : selectCountry(x.name), [selectCountry])
+
   return (
     <div className="relative w-screen h-screen bg-black text-white flex overflow-hidden">
 
@@ -156,11 +189,11 @@ export default function App() {
           polygonCapColor={polyCapColor}
           polygonSideColor={polySideColor}
           polygonStrokeColor={polyStroke}
-          onPolygonClick={p => selectCountry(p.properties.ADMIN)}
+          onPolygonClick={handlePolygonClick}
           pathsData={lines}
-          pathPoints={x => x}
-          pathPointLat={p => p.lat}
-          pathPointLng={p => p.lng}
+          pathPoints={pathPoints}
+          pathPointLat={pathPointLat}
+          pathPointLng={pathPointLng}
           pathColor={pathColor}
           pointsData={points}
           pointLat="lat"
@@ -168,17 +201,14 @@ export default function App() {
           pointColor={pointColor}
           pointRadius={pointRadius}
           pointAltitude={0.01}
-          onPointClick={x => x.type === 's'
-            ? setSelected(p => ({ ...p, state: x.name }))
-            : selectCountry(x.name)
-          }
+          onPointClick={handlePointClick}
           labelsData={labels}
           labelLat="lat"
           labelLng="lng"
           labelText="name"
-          labelSize={x => x.sz || 0.5}
+          labelSize={labelSize}
           labelDotRadius={0}
-          labelColor={x => x.clr}
+          labelColor={labelColor}
           labelAltitude={0.015}
         />
       </div>
